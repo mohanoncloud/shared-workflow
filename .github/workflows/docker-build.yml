@@ -1,0 +1,71 @@
+name: Reusable - Docker build
+
+on:
+  workflow_call:
+    inputs:
+      SERVICE_LOCATION:
+        required: true
+        type: string
+      SERVICE_NAME:
+        required: true
+        type: string
+      BUILD_ARTIFACT:
+        required: true
+        type: string
+      BASE_SERVICE_NAME:
+        required: false
+        type: string
+
+jobs:
+  docker-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.BUILD_ARTIFACT }}
+
+      - name: Restore the artifacts
+        run: unzip -o ${{ inputs.BUILD_ARTIFACT }}.zip
+
+      - name: Set image name and build args
+        id: vars
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/${{ inputs.SERVICE_NAME }}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ inputs.BASE_SERVICE_NAME }}" ]; then
+            echo "base_arg=BASE_IMAGE=ghcr.io/${owner}/${{ inputs.BASE_SERVICE_NAME }}:${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          flavor: latest=false
+          tags: type=ref,event=branch
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.SERVICE_LOCATION }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SOURCE=${{ github.repository }}
+            COMMIT_HASH=${{ github.sha }}
+            COMMIT_ID=${{ github.sha }}
+            BUILD_TIME=${{ steps.vars.outputs.build_time }}
+            ${{ steps.vars.outputs.base_arg }}
