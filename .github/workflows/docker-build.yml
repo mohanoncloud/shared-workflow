@@ -53,6 +53,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Branch push -> tag = branch name. Pull request -> pr-<number> (built only, never pushed).
+      # sha-<short> is always added so the tag list is never empty (buildx fails with "tag is needed").
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -61,6 +62,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=ref,event=pr
+            type=sha
 
       # Pull requests: build only, to check the Dockerfile. Pushed to GHCR only after merge (branch push).
       - uses: docker/build-push-action@v6
