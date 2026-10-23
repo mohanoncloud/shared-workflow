@@ -39,7 +39,9 @@ jobs:
           echo "image=ghcr.io/${owner}/${{ inputs.SERVICE_NAME }}" >> "$GITHUB_OUTPUT"
           echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           if [ -n "${{ inputs.BASE_SERVICE_NAME }}" ]; then
-            echo "base_arg=BASE_IMAGE=ghcr.io/${owner}/${{ inputs.BASE_SERVICE_NAME }}:${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+            # On a PR, use the base image of the target branch (e.g. develop), which already exists in GHCR.
+            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then branch="$GITHUB_BASE_REF"; else branch="$GITHUB_REF_NAME"; fi
+            echo "base_arg=BASE_IMAGE=ghcr.io/${owner}/${{ inputs.BASE_SERVICE_NAME }}:${branch//\//-}" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: docker/setup-buildx-action@v3
@@ -50,17 +52,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Branch push -> tag = branch name. Pull request -> pr-<number> (built only, never pushed).
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.vars.outputs.image }}
           flavor: latest=false
-          tags: type=ref,event=branch
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
 
+      # Pull requests: build only, to check the Dockerfile. Pushed to GHCR only after merge (branch push).
       - uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.SERVICE_LOCATION }}
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
