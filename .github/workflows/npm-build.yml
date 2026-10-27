@@ -1,0 +1,93 @@
+name: Reusable - npm build
+
+# The npm counterpart of maven-build.yml: installs, builds and uploads OUTPUT_DIR as
+# <BUILD_ARTIFACT>.zip, the artifact docker-build.yml downloads and unzips before the image build.
+#
+# Use it when the Dockerfile COPYs a prebuilt bundle. When the Dockerfile runs the npm build
+# itself (multi-stage), skip this workflow and call docker-build.yml without BUILD_ARTIFACT;
+# otherwise the project is built twice.
+on:
+  workflow_call:
+    inputs:
+      SERVICE_LOCATION:
+        required: true
+        type: string
+      BUILD_ARTIFACT:
+        required: true
+        type: string
+      NODE_VERSION:
+        default: "22"
+        type: string
+      # The package.json script to run.
+      BUILD_SCRIPT:
+        default: "build"
+        type: string
+      # The build output, relative to SERVICE_LOCATION, zipped as the artifact.
+      OUTPUT_DIR:
+        default: "dist"
+        type: string
+      # true when the project installs private @<owner> packages (e.g. @bhs-bs/ui) from GitHub
+      # Packages. The calling job must then grant `packages: read`.
+      NPM_REGISTRY_SECRET:
+        default: false
+        type: boolean
+      # Build-time environment, one KEY=VALUE per line, exported before `npm run`. Callers cannot
+      # set env: on a reusable workflow, and frontend builds need it: e.g. CI=false (create-react-app
+      # fails on lint warnings when CI=true, which Actions sets), VITE_* / REACT_APP_* values.
+      BUILD_ENV:
+        default: ""
+        type: string
+
+jobs:
+  # No permissions: block, on purpose: the job inherits the calling job's token. Requesting
+  # packages: read here would reject every caller that does not grant it, at startup, even
+  # without private packages. Callers using NPM_REGISTRY_SECRET grant it themselves.
+  npm-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.SERVICE_LOCATION }}/package-lock.json
+          # Writes an .npmrc mapping the @<owner> scope (lowercased by setup-node) to GitHub
+          # Packages, reading the token from NODE_AUTH_TOKEN.
+          registry-url: ${{ inputs.NPM_REGISTRY_SECRET && 'https://npm.pkg.github.com' || '' }}
+
+      # npm ci, not npm install: it installs exactly package-lock.json and fails if it is out of
+      # sync with package.json, so CI never resolves different versions from a developer's machine.
+      - name: Install
+        working-directory: ${{ inputs.SERVICE_LOCATION }}
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.NPM_REGISTRY_SECRET && secrets.GITHUB_TOKEN || '' }}
+
+      # BUILD_ENV arrives through env, not interpolated into the script, and only well-formed
+      # KEY=VALUE lines are exported, so a value cannot inject shell commands.
+      - name: Build
+        working-directory: ${{ inputs.SERVICE_LOCATION }}
+        env:
+          BUILD_ENV: ${{ inputs.BUILD_ENV }}
+        run: |
+          while IFS= read -r line; do
+            [ -z "${line//[[:space:]]/}" ] && continue
+            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              echo "::error::BUILD_ENV line is not KEY=VALUE: ${line%%=*}"
+              exit 1
+            fi
+            export "$line"
+          done <<< "$BUILD_ENV"
+          npm run ${{ inputs.BUILD_SCRIPT }}
+
+      - name: Zip the build output
+        run: zip -r ${{ inputs.BUILD_ARTIFACT }}.zip "${{ inputs.SERVICE_LOCATION }}/${{ inputs.OUTPUT_DIR }}"
+
+      - name: Upload the artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.BUILD_ARTIFACT }}
+          path: ./${{ inputs.BUILD_ARTIFACT }}.zip
+          if-no-files-found: error
+          retention-days: 1
