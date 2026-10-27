@@ -29,8 +29,8 @@ jobs:
   with the same `BUILD_ARTIFACT`.
 
 **Private `@<owner>` packages** (e.g. `@bhs-bs/ui`): set `NPM_REGISTRY_SECRET: true` and give the
-calling job `packages: read` (or `write`). The caller's `GITHUB_TOKEN` is used, so there is no
-secret to create. In `docker-build.yml` it reaches the build as the `npmrc` build secret, never as
+calling job `packages: read` (`docker-build.yml` already needs `write`). The caller's
+`GITHUB_TOKEN` is used, so there is no secret to create. In `docker-build.yml` it reaches the build as the `npmrc` build secret, never as
 an ARG, so it is not recorded in the image:
 
 ```dockerfile
@@ -39,6 +39,39 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci
 
 Each repo that installs a private package must be granted read access to it, under the package's
 **Package settings → Manage Actions access**. Without it, `npm ci` fails with 403 or 404.
+
+**Build-time environment** (`npm-build.yml`): a caller can't set `env:` on a reusable workflow, so
+pass `BUILD_ENV`, one `KEY=VALUE` per line.
+
+Example caller for an npm project whose Dockerfile copies the built bundle:
+
+```yaml
+jobs:
+  build-npm:
+    permissions:
+      contents: read
+      packages: read          # needed only with NPM_REGISTRY_SECRET
+    uses: BHS-BS/shared-workflow/.github/workflows/npm-build.yml@develop
+    with:
+      SERVICE_LOCATION: ./my-ui
+      BUILD_ARTIFACT: my-ui
+      OUTPUT_DIR: build
+      NPM_REGISTRY_SECRET: true
+      BUILD_ENV: |
+        CI=false
+        REACT_APP_API_URL=/api
+
+  build-docker:
+    needs: build-npm
+    permissions:
+      contents: read
+      packages: write
+    uses: BHS-BS/shared-workflow/.github/workflows/docker-build.yml@develop
+    with:
+      SERVICE_LOCATION: ./my-ui
+      SERVICE_NAME: my-ui
+      BUILD_ARTIFACT: my-ui
+```
 
 ## Contributing
 

@@ -27,17 +27,23 @@ on:
         default: "dist"
         type: string
       # true when the project installs private @<owner> packages (e.g. @bhs-bs/ui) from GitHub
-      # Packages. Needs `packages: read` on the calling job.
+      # Packages. The calling job must then grant `packages: read`.
       NPM_REGISTRY_SECRET:
         default: false
         type: boolean
+      # Build-time environment, one KEY=VALUE per line, exported before `npm run`. Callers cannot
+      # set env: on a reusable workflow, and frontend builds need it: e.g. CI=false (create-react-app
+      # fails on lint warnings when CI=true, which Actions sets), VITE_* / REACT_APP_* values.
+      BUILD_ENV:
+        default: ""
+        type: string
 
 jobs:
+  # No permissions: block, on purpose: the job inherits the calling job's token. Requesting
+  # packages: read here would reject every caller that does not grant it, at startup, even
+  # without private packages. Callers using NPM_REGISTRY_SECRET grant it themselves.
   npm-build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
     steps:
       - uses: actions/checkout@v4
 
@@ -58,9 +64,22 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ inputs.NPM_REGISTRY_SECRET && secrets.GITHUB_TOKEN || '' }}
 
+      # BUILD_ENV arrives through env, not interpolated into the script, and only well-formed
+      # KEY=VALUE lines are exported, so a value cannot inject shell commands.
       - name: Build
         working-directory: ${{ inputs.SERVICE_LOCATION }}
-        run: npm run ${{ inputs.BUILD_SCRIPT }}
+        env:
+          BUILD_ENV: ${{ inputs.BUILD_ENV }}
+        run: |
+          while IFS= read -r line; do
+            [ -z "${line//[[:space:]]/}" ] && continue
+            if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+              echo "::error::BUILD_ENV line is not KEY=VALUE: ${line%%=*}"
+              exit 1
+            fi
+            export "$line"
+          done <<< "$BUILD_ENV"
+          npm run ${{ inputs.BUILD_SCRIPT }}
 
       - name: Zip the build output
         run: zip -r ${{ inputs.BUILD_ARTIFACT }}.zip "${{ inputs.SERVICE_LOCATION }}/${{ inputs.OUTPUT_DIR }}"

@@ -57,11 +57,16 @@ jobs:
             echo "base_arg=BASE_IMAGE=ghcr.io/${owner}/${{ inputs.BASE_SERVICE_NAME }}:${branch//\//-}" >> "$GITHUB_OUTPUT"
           fi
 
+      # The token comes in through env, not interpolated into the script, and the file is
+      # owner-only.
       - name: Write the npm registry secret
         if: inputs.NPM_REGISTRY_SECRET
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "@${GITHUB_REPOSITORY_OWNER,,}:registry=https://npm.pkg.github.com" > "$RUNNER_TEMP/npmrc"
-          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" >> "$RUNNER_TEMP/npmrc"
+          umask 077
+          { echo "@${GITHUB_REPOSITORY_OWNER,,}:registry=https://npm.pkg.github.com"
+            echo "//npm.pkg.github.com/:_authToken=${TOKEN}"; } > "$RUNNER_TEMP/npmrc"
 
       - uses: docker/setup-buildx-action@v3
 
