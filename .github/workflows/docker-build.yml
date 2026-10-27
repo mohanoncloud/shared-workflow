@@ -9,9 +9,12 @@ on:
       SERVICE_NAME:
         required: true
         type: string
+      # Optional: leave it out when the Dockerfile builds from source itself (e.g. a multi-stage
+      # npm build), and no artifact is downloaded.
       BUILD_ARTIFACT:
-        required: true
+        required: false
         type: string
+        default: ''
       BASE_SERVICE_NAME:
         required: false
         type: string
@@ -26,10 +29,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
+        if: inputs.BUILD_ARTIFACT != ''
         with:
           name: ${{ inputs.BUILD_ARTIFACT }}
 
       - name: Restore the artifacts
+        if: inputs.BUILD_ARTIFACT != ''
         run: unzip -o ${{ inputs.BUILD_ARTIFACT }}.zip
 
       - name: Set image name and build args
