@@ -18,6 +18,14 @@ on:
       BASE_SERVICE_NAME:
         required: false
         type: string
+      # true when the Dockerfile installs private @<owner> npm packages (e.g. @bhs-bs/ui) from GitHub Packages. The
+      # caller's GITHUB_TOKEN is passed as the build secret `npmrc` (use it with
+      # `RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci`), never as a build ARG:
+      # an ARG is recorded in the image history and would leak the token to anyone who pulls it.
+      NPM_REGISTRY_SECRET:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   docker-build:
@@ -48,6 +56,12 @@ jobs:
             if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then branch="$GITHUB_BASE_REF"; else branch="$GITHUB_REF_NAME"; fi
             echo "base_arg=BASE_IMAGE=ghcr.io/${owner}/${{ inputs.BASE_SERVICE_NAME }}:${branch//\//-}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Write the npm registry secret
+        if: inputs.NPM_REGISTRY_SECRET
+        run: |
+          echo "@${GITHUB_REPOSITORY_OWNER,,}:registry=https://npm.pkg.github.com" > "$RUNNER_TEMP/npmrc"
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" >> "$RUNNER_TEMP/npmrc"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -83,3 +97,4 @@ jobs:
             COMMIT_ID=${{ github.sha }}
             BUILD_TIME=${{ steps.vars.outputs.build_time }}
             ${{ steps.vars.outputs.base_arg }}
+          secret-files: ${{ inputs.NPM_REGISTRY_SECRET && format('npmrc={0}/npmrc', runner.temp) || '' }}

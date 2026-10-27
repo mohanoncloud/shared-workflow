@@ -1,0 +1,74 @@
+name: Reusable - npm build
+
+# The npm counterpart of maven-build.yml: installs, builds and uploads OUTPUT_DIR as
+# <BUILD_ARTIFACT>.zip, the artifact docker-build.yml downloads and unzips before the image build.
+#
+# Use it when the Dockerfile COPYs a prebuilt bundle. When the Dockerfile runs the npm build
+# itself (multi-stage), skip this workflow and call docker-build.yml without BUILD_ARTIFACT;
+# otherwise the project is built twice.
+on:
+  workflow_call:
+    inputs:
+      SERVICE_LOCATION:
+        required: true
+        type: string
+      BUILD_ARTIFACT:
+        required: true
+        type: string
+      NODE_VERSION:
+        default: "22"
+        type: string
+      # The package.json script to run.
+      BUILD_SCRIPT:
+        default: "build"
+        type: string
+      # The build output, relative to SERVICE_LOCATION, zipped as the artifact.
+      OUTPUT_DIR:
+        default: "dist"
+        type: string
+      # true when the project installs private @<owner> packages (e.g. @bhs-bs/ui) from GitHub
+      # Packages. Needs `packages: read` on the calling job.
+      NPM_REGISTRY_SECRET:
+        default: false
+        type: boolean
+
+jobs:
+  npm-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.SERVICE_LOCATION }}/package-lock.json
+          # Writes an .npmrc mapping the @<owner> scope (lowercased by setup-node) to GitHub
+          # Packages, reading the token from NODE_AUTH_TOKEN.
+          registry-url: ${{ inputs.NPM_REGISTRY_SECRET && 'https://npm.pkg.github.com' || '' }}
+
+      # npm ci, not npm install: it installs exactly package-lock.json and fails if it is out of
+      # sync with package.json, so CI never resolves different versions from a developer's machine.
+      - name: Install
+        working-directory: ${{ inputs.SERVICE_LOCATION }}
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.NPM_REGISTRY_SECRET && secrets.GITHUB_TOKEN || '' }}
+
+      - name: Build
+        working-directory: ${{ inputs.SERVICE_LOCATION }}
+        run: npm run ${{ inputs.BUILD_SCRIPT }}
+
+      - name: Zip the build output
+        run: zip -r ${{ inputs.BUILD_ARTIFACT }}.zip "${{ inputs.SERVICE_LOCATION }}/${{ inputs.OUTPUT_DIR }}"
+
+      - name: Upload the artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.BUILD_ARTIFACT }}
+          path: ./${{ inputs.BUILD_ARTIFACT }}.zip
+          if-no-files-found: error
+          retention-days: 1
