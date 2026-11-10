@@ -1,0 +1,187 @@
+name: Reusable - Helm chart lint and publish
+
+# Lints the Helm charts of a repo and, on a git tag, publishes them to GHCR as OCI artifacts:
+#   oci://ghcr.io/<owner>/charts/<chart>:<version>
+#
+# - Pull request: lint + render the charts changed by the PR. Nothing is published.
+# - Branch push / manual run on a branch: lint + render all charts. Nothing is published.
+# - Tag push (or a manual run started from a tag): lint + render all charts, then publish them.
+#
+# Publishing uses the caller's GITHUB_TOKEN (packages: write); no PAT is needed.
+# A release version (no pre-release suffix, e.g. 1.3.0) is never overwritten: if it already
+# exists in GHCR the job fails before anything is pushed and asks for a version bump.
+# A pre-release version (e.g. 1.3.0-develop) is overwritten.
+
+on:
+  workflow_call:
+    inputs:
+      # Directory holding one sub-directory per chart (each with a Chart.yaml).
+      CHARTS_DIR:
+        required: false
+        type: string
+        default: ./helm
+      # Chart directory names to skip, separated by spaces, commas or pipes (e.g. "regproc-salt").
+      IGNORE_CHARTS:
+        required: false
+        type: string
+        default: ''
+      # OCI path the charts are pushed under. Empty -> ghcr.io/<owner>/charts.
+      CHART_REGISTRY_PATH:
+        required: false
+        type: string
+        default: ''
+      # Classic (non-OCI) chart repositories the dependencies come from, one "name=url" per line.
+      # Needed only until every dependency is served from oci://ghcr.io/bhs-bs/charts (MP-196);
+      # OCI dependencies need no entry here.
+      DEPENDENCY_REPOS:
+        required: false
+        type: string
+        default: |
+          bitnami=https://charts.bitnami.com/bitnami
+      HELM_VERSION:
+        required: false
+        type: string
+        default: v3.17.3
+
+jobs:
+  helm-chart:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CHARTS_DIR: ${{ inputs.CHARTS_DIR }}
+      IGNORE_CHARTS: ${{ inputs.IGNORE_CHARTS }}
+      DEPENDENCY_REPOS: ${{ inputs.DEPENDENCY_REPOS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ inputs.HELM_VERSION }}
+
+      - name: Set registry path and publish flag
+        id: vars
+        env:
+          CHART_REGISTRY_PATH: ${{ inputs.CHART_REGISTRY_PATH }}
+        run: |
+          path="${CHART_REGISTRY_PATH:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts}"
+          path="${path#oci://}"
+          echo "registry_path=${path}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # On a PR only the charts with changed files are checked; otherwise every chart.
+      - name: Find charts
+        id: charts
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          shopt -s nullglob
+          charts_dir="${CHARTS_DIR%/}"
+          ignore=" $(echo "$IGNORE_CHARTS" | tr ',|' '  ' | xargs) "
+          candidates=()
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            while read -r f; do
+              name="${f#"${charts_dir#./}/"}"; name="${name%%/*}"
+              [ -f "${charts_dir}/${name}/Chart.yaml" ] && candidates+=("$name")
+            done < <(git diff --name-only "origin/${BASE_REF}...HEAD" -- "$charts_dir")
+          else
+            for c in "${charts_dir}"/*/Chart.yaml; do candidates+=("$(basename "$(dirname "$c")")"); done
+          fi
+          charts=()
+          for name in $(printf '%s\n' "${candidates[@]}" | sort -u); do
+            if [[ "$ignore" == *" $name "* ]]; then echo "Skipping ignored chart: $name"; continue; fi
+            charts+=("$name")
+          done
+          echo "Charts: ${charts[*]:-none}"
+          echo "list=${charts[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: Add dependency repositories
+        if: steps.charts.outputs.list != ''
+        run: |
+          while IFS='=' read -r name url; do
+            name="$(echo "$name" | xargs)"; url="$(echo "$url" | xargs)"
+            [ -z "$name" ] && continue
+            helm repo add "$name" "$url"
+          done <<< "$DEPENDENCY_REPOS"
+          helm repo update
+
+      # Logged in before the dependency build too, so OCI dependencies in ghcr.io/bhs-bs/charts resolve.
+      - name: Log in to GHCR
+        if: steps.charts.outputs.list != ''
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Lint and render charts
+        if: steps.charts.outputs.list != ''
+        env:
+          CHARTS: ${{ steps.charts.outputs.list }}
+        run: |
+          failed=()
+          for name in $CHARTS; do
+            dir="${CHARTS_DIR%/}/${name}"
+            echo "::group::${name}"
+            if helm dependency build "$dir" && helm lint "$dir" && helm template "$name" "$dir" > /dev/null; then
+              echo "OK: ${name}"
+            else
+              failed+=("$name")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::Charts failed lint/render: ${failed[*]}"
+            exit 1
+          fi
+
+      # All versions are checked before anything is pushed, so a release is never half published.
+      - name: Check chart versions in GHCR
+        if: steps.vars.outputs.publish == 'true' && steps.charts.outputs.list != ''
+        env:
+          CHARTS: ${{ steps.charts.outputs.list }}
+          REGISTRY_PATH: ${{ steps.vars.outputs.registry_path }}
+        run: |
+          blocked=()
+          for name in $CHARTS; do
+            dir="${CHARTS_DIR%/}/${name}"
+            chart_name="$(helm show chart "$dir" | yq '.name')"
+            version="$(helm show chart "$dir" | yq '.version')"
+            if helm show chart "oci://${REGISTRY_PATH}/${chart_name}" --version "$version" > /dev/null 2>&1; then
+              if [[ "$version" == *-* ]]; then
+                echo "::warning::${chart_name} ${version} exists; pre-release version, it will be overwritten."
+              else
+                echo "::error::${chart_name} ${version} is already published. Bump the version in ${dir}/Chart.yaml."
+                blocked+=("${chart_name}:${version}")
+              fi
+            fi
+          done
+          [ ${#blocked[@]} -eq 0 ] || exit 1
+
+      - name: Package and push charts
+        if: steps.vars.outputs.publish == 'true' && steps.charts.outputs.list != ''
+        env:
+          CHARTS: ${{ steps.charts.outputs.list }}
+          REGISTRY_PATH: ${{ steps.vars.outputs.registry_path }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/charts"
+          for name in $CHARTS; do
+            helm package "${CHARTS_DIR%/}/${name}" --destination "$RUNNER_TEMP/charts"
+          done
+          {
+            echo "### Published Helm charts"
+            echo
+            echo "| Chart | Version | Install |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for pkg in "$RUNNER_TEMP"/charts/*.tgz; do
+            helm push "$pkg" "oci://${REGISTRY_PATH}"
+            chart_name="$(helm show chart "$pkg" | yq '.name')"
+            version="$(helm show chart "$pkg" | yq '.version')"
+            echo "| ${chart_name} | ${version} | \`helm install ${chart_name} oci://${REGISTRY_PATH}/${chart_name} --version ${version}\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
