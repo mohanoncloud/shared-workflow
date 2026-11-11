@@ -1,11 +1,14 @@
 name: Reusable - Helm chart lint and publish
 
-# Lints the Helm charts of a repo and, on a git tag, publishes them to GHCR as OCI artifacts:
+# Lints the Helm charts of a repo and, when a PR is merged (a push to a branch), publishes the
+# charts that changed to GHCR as OCI artifacts:
 #   oci://ghcr.io/<owner>/charts/<chart>:<version>
 #
 # - Pull request: lint + render the charts changed by the PR. Nothing is published.
-# - Branch push / manual run on a branch: lint + render all charts. Nothing is published.
-# - Tag push (or a manual run started from a tag): lint + render all charts, then publish them.
+# - Branch push (PR merged): lint + render the charts changed by the push, then publish them.
+#   Charts that did not change are not published. The caller chooses the branches (e.g. develop
+#   only) and should filter on its charts directory (paths: helm/**).
+# - Manual run (workflow_dispatch) or tag push: lint + render all charts. Nothing is published.
 #
 # Publishing uses the caller's GITHUB_TOKEN (packages: write); no PAT is needed.
 # A release version (no pre-release suffix, e.g. 1.3.0) is never overwritten: if it already
@@ -46,6 +49,7 @@ on:
 jobs:
   helm-lint-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -70,27 +74,39 @@ jobs:
           path="${CHART_REGISTRY_PATH:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts}"
           path="${path#oci://}"
           echo "registry_path=${path}" >> "$GITHUB_OUTPUT"
-          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "branch" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # On a PR only the charts with changed files are checked; otherwise every chart.
+      # PR: the charts changed by the PR. Branch push: the charts changed by the push (for a merge,
+      # everything the merged PR changed). Otherwise, or when the push has no usable "before"
+      # commit (new branch), every chart.
       - name: Find charts
         id: charts
         env:
           BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
         run: |
           shopt -s nullglob
           charts_dir="${CHARTS_DIR%/}"
           ignore=" $(echo "$IGNORE_CHARTS" | tr ',|' '  ' | xargs) "
-          candidates=()
+          range=""
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            range="origin/${BASE_REF}...HEAD"
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "branch" ] \
+               && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            range="${BEFORE}..${GITHUB_SHA}"
+          fi
+          candidates=()
+          if [ -n "$range" ]; then
+            echo "Charts changed in ${range}"
             while read -r f; do
               name="${f#"${charts_dir#./}/"}"; name="${name%%/*}"
               [ -f "${charts_dir}/${name}/Chart.yaml" ] && candidates+=("$name")
-            done < <(git diff --name-only "origin/${BASE_REF}...HEAD" -- "$charts_dir")
+            done < <(git diff --name-only "$range" -- "$charts_dir")
           else
             for c in "${charts_dir}"/*/Chart.yaml; do candidates+=("$(basename "$(dirname "$c")")"); done
           fi
