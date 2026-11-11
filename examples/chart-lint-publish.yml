@@ -1,9 +1,9 @@
 # Copy to .github/workflows/chart-lint-publish.yml in a module repo (MyPass), replacing its
-# existing chart workflow. Charts are published to oci://ghcr.io/bhs-bs/charts.
+# existing chart workflow. Each chart is published to oci://ghcr.io/bhs-bs/<chart>.
 #
-# - PR that changes helm/: lint + render the changed charts.
+# - PR that changes helm/: lint + render every chart in helm/.
 # - PR merged into develop or a release* branch with changes in helm/: lint, then publish the
-#   changed charts.
+#   charts in helm/ (all of them, not only the changed ones).
 name: Helm charts
 
 on:

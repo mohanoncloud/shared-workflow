@@ -1,18 +1,20 @@
 name: Reusable - Helm chart lint and publish
 
-# Lints the Helm charts of a repo and, when a PR is merged (a push to a branch), publishes the
-# charts that changed to GHCR as OCI artifacts:
-#   oci://ghcr.io/<owner>/charts/<chart>:<version>
+# Lints the Helm charts of a repo and, when a PR is merged (a push to a branch), publishes them
+# to GHCR as OCI artifacts, one package per chart, named after the chart:
+#   oci://ghcr.io/<owner>/<chart>:<version>   (e.g. ghcr.io/bhs-bs/keymanager:0.0.1-develop)
 #
-# - Pull request: lint + render the charts changed by the PR. Nothing is published.
-# - Branch push (PR merged): lint + render the charts changed by the push, then publish them.
-#   Charts that did not change are not published. The caller chooses the branches (e.g. develop
-#   only) and should filter on its charts directory (paths: helm/**).
+# - Pull request: if the PR changes any chart, lint + render every chart. Nothing is published.
+# - Branch push (PR merged): if the push changed any chart, lint + render every chart in the
+#   charts directory and publish them all. The caller chooses the branches and should filter on
+#   its charts directory (paths: helm/**).
 # - Manual run (workflow_dispatch) or tag push: lint + render all charts. Nothing is published.
 #
 # Publishing uses the caller's GITHUB_TOKEN (packages: write); no PAT is needed.
-# A release version (no pre-release suffix, e.g. 1.3.0) is never overwritten: if it already
-# exists in GHCR the job fails before anything is pushed and asks for a version bump.
+# A release version (no pre-release suffix, e.g. 1.3.0) is never overwritten:
+#   - a chart changed by the push whose version already exists in GHCR fails the job before
+#     anything is pushed, and asks for a version bump;
+#   - an unchanged chart whose version already exists is skipped.
 # A pre-release version (e.g. 1.3.0-develop) is overwritten.
 
 on:
@@ -28,13 +30,13 @@ on:
         required: false
         type: string
         default: ''
-      # OCI path the charts are pushed under. Empty -> ghcr.io/<owner>/charts.
+      # OCI path the charts are pushed under. Empty -> ghcr.io/<owner> (each chart is ghcr.io/<owner>/<chart>).
       CHART_REGISTRY_PATH:
         required: false
         type: string
         default: ''
       # Classic (non-OCI) chart repositories the dependencies come from, one "name=url" per line.
-      # Needed only until every dependency is served from oci://ghcr.io/bhs-bs/charts (MP-196);
+      # Needed only until every dependency is served from oci://ghcr.io/bhs-bs (MP-196);
       # OCI dependencies need no entry here.
       DEPENDENCY_REPOS:
         required: false
@@ -71,7 +73,7 @@ jobs:
         env:
           CHART_REGISTRY_PATH: ${{ inputs.CHART_REGISTRY_PATH }}
         run: |
-          path="${CHART_REGISTRY_PATH:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts}"
+          path="${CHART_REGISTRY_PATH:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}}"
           path="${path#oci://}"
           echo "registry_path=${path}" >> "$GITHUB_OUTPUT"
           if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "branch" ]; then
@@ -80,9 +82,10 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # PR: the charts changed by the PR. Branch push: the charts changed by the push (for a merge,
-      # everything the merged PR changed). Otherwise, or when the push has no usable "before"
-      # commit (new branch), every chart.
+      # Changed charts come from the PR diff, or for a branch push from <before>..<sha> (for a merge,
+      # everything the merged PR changed). If any chart changed, every chart in the charts directory
+      # is checked (and published on a push), because the repo's charts are released together.
+      # Manual runs, tags and pushes without a usable "before" commit (new branch): every chart.
       - name: Find charts
         id: charts
         env:
@@ -100,23 +103,28 @@ jobs:
                && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
             range="${BEFORE}..${GITHUB_SHA}"
           fi
-          candidates=()
+          all=()
+          for c in "${charts_dir}"/*/Chart.yaml; do
+            name="$(basename "$(dirname "$c")")"
+            if [[ "$ignore" == *" $name "* ]]; then echo "Skipping ignored chart: $name"; continue; fi
+            all+=("$name")
+          done
+          changed=()
           if [ -n "$range" ]; then
-            echo "Charts changed in ${range}"
             while read -r f; do
               name="${f#"${charts_dir#./}/"}"; name="${name%%/*}"
-              [ -f "${charts_dir}/${name}/Chart.yaml" ] && candidates+=("$name")
+              [[ " ${all[*]} " == *" $name "* ]] && changed+=("$name")
             done < <(git diff --name-only "$range" -- "$charts_dir")
+            changed=($(printf '%s\n' "${changed[@]}" | sort -u))
+            echo "Charts changed in ${range}: ${changed[*]:-none}"
           else
-            for c in "${charts_dir}"/*/Chart.yaml; do candidates+=("$(basename "$(dirname "$c")")"); done
+            changed=("${all[@]}")
           fi
           charts=()
-          for name in $(printf '%s\n' "${candidates[@]}" | sort -u); do
-            if [[ "$ignore" == *" $name "* ]]; then echo "Skipping ignored chart: $name"; continue; fi
-            charts+=("$name")
-          done
+          [ ${#changed[@]} -gt 0 ] && charts=("${all[@]}")
           echo "Charts: ${charts[*]:-none}"
           echo "list=${charts[*]}" >> "$GITHUB_OUTPUT"
+          echo "changed=${changed[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Add dependency repositories
         if: steps.charts.outputs.list != ''
@@ -128,7 +136,7 @@ jobs:
           done <<< "$DEPENDENCY_REPOS"
           helm repo update
 
-      # Logged in before the dependency build too, so OCI dependencies in ghcr.io/bhs-bs/charts resolve.
+      # Logged in before the dependency build too, so OCI dependencies in ghcr.io/bhs-bs resolve.
       - name: Log in to GHCR
         if: steps.charts.outputs.list != ''
         env:
@@ -158,12 +166,15 @@ jobs:
 
       # All versions are checked before anything is pushed, so a release is never half published.
       - name: Check chart versions in GHCR
+        id: versions
         if: steps.vars.outputs.publish == 'true' && steps.charts.outputs.list != ''
         env:
           CHARTS: ${{ steps.charts.outputs.list }}
+          CHANGED: ${{ steps.charts.outputs.changed }}
           REGISTRY_PATH: ${{ steps.vars.outputs.registry_path }}
         run: |
           blocked=()
+          publish=()
           for name in $CHARTS; do
             dir="${CHARTS_DIR%/}/${name}"
             chart_name="$(helm show chart "$dir" | yq '.name')"
@@ -171,18 +182,25 @@ jobs:
             if helm show chart "oci://${REGISTRY_PATH}/${chart_name}" --version "$version" > /dev/null 2>&1; then
               if [[ "$version" == *-* ]]; then
                 echo "::warning::${chart_name} ${version} exists; pre-release version, it will be overwritten."
-              else
+              elif [[ " $CHANGED " == *" $name "* ]]; then
                 echo "::error::${chart_name} ${version} is already published. Bump the version in ${dir}/Chart.yaml."
                 blocked+=("${chart_name}:${version}")
+                continue
+              else
+                echo "::notice::${chart_name} ${version} is already published and the chart did not change; skipped."
+                continue
               fi
             fi
+            publish+=("$name")
           done
           [ ${#blocked[@]} -eq 0 ] || exit 1
+          echo "Publishing: ${publish[*]:-none}"
+          echo "list=${publish[*]}" >> "$GITHUB_OUTPUT"
 
       - name: Package and push charts
-        if: steps.vars.outputs.publish == 'true' && steps.charts.outputs.list != ''
+        if: steps.vars.outputs.publish == 'true' && steps.versions.outputs.list != ''
         env:
-          CHARTS: ${{ steps.charts.outputs.list }}
+          CHARTS: ${{ steps.versions.outputs.list }}
           REGISTRY_PATH: ${{ steps.vars.outputs.registry_path }}
         run: |
           mkdir -p "$RUNNER_TEMP/charts"
