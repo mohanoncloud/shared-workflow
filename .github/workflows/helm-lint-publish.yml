@@ -44,7 +44,7 @@ on:
         default: v3.17.3
 
 jobs:
-  helm-chart:
+  helm-lint-publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read

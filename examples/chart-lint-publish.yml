@@ -1,5 +1,5 @@
-# Copy to .github/workflows/chart-lint-publish.yml in a module repo, replacing the MOSIP
-# kattu workflow (which published to mosip-helm with ACTION_PAT).
+# Copy to .github/workflows/chart-lint-publish.yml in a module repo (MyPass), replacing its
+# existing chart workflow. Charts are published to oci://ghcr.io/bhs-bs/charts.
 name: Helm charts
 
 on:
@@ -17,8 +17,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  helm-chart:
-    uses: BHS-BS/shared-workflow/.github/workflows/helm-chart.yml@develop
+  helm-lint-publish:
+    uses: BHS-BS/shared-workflow/.github/workflows/helm-lint-publish.yml@develop
     permissions:
       contents: read
       packages: write
