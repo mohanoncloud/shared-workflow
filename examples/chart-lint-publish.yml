@@ -4,7 +4,7 @@
 # - PR that changes helm/: lint + render every chart in helm/.
 # - PR merged into develop or a release* branch with changes in helm/: lint, then publish the
 #   charts in helm/ (all of them, not only the changed ones).
-name: Helm charts
+name: Validate / Publish helm charts
 
 on:
   pull_request:
