@@ -2,7 +2,9 @@ name: Reusable - Helm chart lint and publish
 
 # Lints the Helm charts of a repo and, when a PR is merged (a push to a branch), publishes them
 # to GHCR as OCI artifacts, one package per chart, named after the chart:
-#   oci://ghcr.io/<owner>/<chart>:<version>   (e.g. ghcr.io/bhs-bs/keymanager:0.0.1-develop)
+#   oci://ghcr.io/<owner>/charts/<chart>:<version>   (e.g. ghcr.io/bhs-bs/charts/keymanager:0.0.1-develop)
+# The charts/ path keeps charts apart from the images in ghcr.io/<owner>/<image>, so a chart and an
+# image with the same name never share a package. Each chart is still its own package.
 #
 # - Pull request: if the PR changes any chart, lint + render every chart. Nothing is published.
 # - Branch push (PR merged): if the push changed any chart, lint + render every chart in the
@@ -30,13 +32,13 @@ on:
         required: false
         type: string
         default: ''
-      # OCI path the charts are pushed under. Empty -> ghcr.io/<owner> (each chart is ghcr.io/<owner>/<chart>).
+      # OCI path the charts are pushed under. Empty -> ghcr.io/<owner>/charts (each chart is ghcr.io/<owner>/charts/<chart>).
       CHART_REGISTRY_PATH:
         required: false
         type: string
         default: ''
       # Classic (non-OCI) chart repositories the dependencies come from, one "name=url" per line.
-      # Needed only until every dependency is served from oci://ghcr.io/bhs-bs (MP-196);
+      # Needed only until every dependency is served from oci://ghcr.io/bhs-bs/charts (MP-196);
       # OCI dependencies need no entry here.
       DEPENDENCY_REPOS:
         required: false
@@ -73,7 +75,7 @@ jobs:
         env:
           CHART_REGISTRY_PATH: ${{ inputs.CHART_REGISTRY_PATH }}
         run: |
-          path="${CHART_REGISTRY_PATH:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}}"
+          path="${CHART_REGISTRY_PATH:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts}"
           path="${path#oci://}"
           echo "registry_path=${path}" >> "$GITHUB_OUTPUT"
           if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "branch" ]; then
@@ -136,7 +138,7 @@ jobs:
           done <<< "$DEPENDENCY_REPOS"
           helm repo update
 
-      # Logged in before the dependency build too, so OCI dependencies in ghcr.io/bhs-bs resolve.
+      # Logged in before the dependency build too, so OCI dependencies in ghcr.io/bhs-bs/charts resolve.
       - name: Log in to GHCR
         if: steps.charts.outputs.list != ''
         env:
