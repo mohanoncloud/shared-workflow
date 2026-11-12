@@ -20,6 +20,13 @@ jobs:
 | `maven-build.yml` | Maven build; uploads the jars as `<BUILD_ARTIFACT>.zip`. `JAVA_VERSION` defaults to `21`. |
 | `npm-build.yml` | npm build (`npm ci` + `npm run <BUILD_SCRIPT>`); uploads `OUTPUT_DIR` as `<BUILD_ARTIFACT>.zip`. `NODE_VERSION` defaults to `22`. |
 | `docker-build.yml` | Builds the image and pushes it to `ghcr.io/<owner>/<SERVICE_NAME>`, tagged with the branch name, or the git tag name on a tag push. PRs build only. |
+| `helm-mirror.yml` | Not reusable; runs in this repo. Copies the third-party charts listed in `helm-mirror/charts.txt` (e.g. Bitnami `common`) to `oci://ghcr.io/<owner>/charts/<chart>`. Runs when the list changes on `develop`, or manually. Existing versions are never overwritten. |
+
+### Chart dependencies from GHCR
+
+Charts use the mirrored `common` chart with `repository: oci://ghcr.io/bhs-bs/charts` in `Chart.yaml`.
+A repo whose workflow builds charts that depend on it must be granted read access to the `charts/common`
+package, under **Package settings → Manage Actions access**.
 
 ### npm projects
 
