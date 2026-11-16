@@ -151,10 +151,22 @@ jobs:
           CHARTS: ${{ steps.charts.outputs.list }}
         run: |
           failed=()
+          # Dependencies are built for every chart first. A chart that bundles a chart next to it
+          # (repository: file://../<chart>, e.g. an umbrella chart) is then built again, so it
+          # bundles that chart together with the chart's own dependencies (e.g. common).
+          for name in $CHARTS; do
+            helm dependency build "${CHARTS_DIR%/}/${name}" || failed+=("$name")
+          done
+          for name in $CHARTS; do
+            dir="${CHARTS_DIR%/}/${name}"
+            if grep -Eq "repository: *[\"']?file://" "$dir/Chart.yaml"; then
+              helm dependency build "$dir" || failed+=("$name")
+            fi
+          done
           for name in $CHARTS; do
             dir="${CHARTS_DIR%/}/${name}"
             echo "::group::${name}"
-            if helm dependency build "$dir" && helm lint "$dir" && helm template "$name" "$dir" > /dev/null; then
+            if [[ " ${failed[*]} " != *" $name "* ]] && helm lint "$dir" && helm template "$name" "$dir" > /dev/null; then
               echo "OK: ${name}"
             else
               failed+=("$name")
