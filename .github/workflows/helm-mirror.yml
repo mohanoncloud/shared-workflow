@@ -1,0 +1,84 @@
+name: Mirror Helm charts to GHCR
+
+# Copies the third-party charts listed in helm-mirror/charts.txt to
+# oci://ghcr.io/<owner>/charts/<chart>:<version>, next to the charts published by helm-lint-publish.yml.
+# Our charts can then use them as dependencies:
+#   dependencies:
+#     - name: common
+#       repository: oci://ghcr.io/bhs-bs/charts
+#       version: 1.x.x
+#
+# Runs when helm-mirror/charts.txt changes on develop, or manually.
+# A chart version that is already in GHCR is skipped, never overwritten.
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - 'helm-mirror/charts.txt'
+      - '.github/workflows/helm-mirror.yml'
+  pull_request:
+    paths:
+      - 'helm-mirror/charts.txt'
+      - '.github/workflows/helm-mirror.yml'
+  workflow_dispatch:
+
+jobs:
+  helm-mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CHART_LIST: helm-mirror/charts.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      # Pull requests only check that every listed chart can be downloaded; nothing is pushed.
+      - name: Mirror charts
+        env:
+          PUSH: ${{ github.event_name != 'pull_request' }}
+        run: |
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          work="$RUNNER_TEMP/charts"
+          mkdir -p "$work"
+          {
+            echo "### Mirrored Helm charts"
+            echo
+            echo "| Chart | Version | Source | Result |"
+            echo "| --- | --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          while read -r repo chart version _; do
+            [ -z "$repo" ] || [[ "$repo" == \#* ]] && continue
+            if [ -z "$chart" ] || [ -z "$version" ]; then
+              echo "::error::Bad line in ${CHART_LIST}: ${repo} ${chart} ${version}"
+              failed=1; continue
+            fi
+            echo "::group::${chart} ${version}"
+            if helm show chart "oci://${registry}/${chart}" --version "$version" > /dev/null 2>&1; then
+              echo "${chart} ${version} is already in ${registry}; skipped."
+              result="already published"
+            elif ! helm pull "$chart" --repo "$repo" --version "$version" --destination "$work"; then
+              echo "::error::Could not download ${chart} ${version} from ${repo}"
+              result="download failed"; failed=1
+            elif [ "$PUSH" = "true" ]; then
+              helm push "${work}/${chart}-${version}.tgz" "oci://${registry}" && result="pushed" || { result="push failed"; failed=1; }
+            else
+              result="downloaded (not pushed on PR)"
+            fi
+            echo "::endgroup::"
+            echo "| ${chart} | ${version} | ${repo} | ${result} |" >> "$GITHUB_STEP_SUMMARY"
+          done < "$CHART_LIST"
+          exit $failed

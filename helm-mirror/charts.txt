@@ -1,0 +1,9 @@
+# Third-party Helm charts copied to oci://ghcr.io/bhs-bs/charts/<chart> by
+# .github/workflows/helm-mirror.yml, so our charts and deploy scripts do not depend on
+# outside chart repositories being available.
+#
+# One chart per line: <repository URL> <chart> <version>
+# A version that is already in GHCR is skipped, never overwritten.
+
+# Bitnami "common" library chart, used by every BHS-BS chart (dependency "common", version 1.x.x).
+https://charts.bitnami.com/bitnami common 1.17.1
