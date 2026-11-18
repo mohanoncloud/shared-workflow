@@ -1,0 +1,104 @@
+name: Reusable - Tag and release
+
+# Creates a git tag and a GitHub release in the calling repository, on the commit the caller ran
+# on (the branch picked in "Run workflow"). Replaces mosip/kattu `tag.yml@master`, which kattu no
+# longer has: its `tag.yaml` is a different, CSV-driven multi-repo release tool.
+#
+# Example caller (.github/workflows/tag.yml in a module repo):
+#
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         TAG:         { description: 'Tag to be published', required: true, type: string }
+#         BODY:        { description: 'Release body message', required: true, default: 'Changes in this Release', type: string }
+#         PRE_RELEASE: { description: 'Pre-release? True/False', required: true, default: 'False', type: string }
+#         DRAFT:       { description: 'Draft? True/False', required: false, default: 'False', type: string }
+#   jobs:
+#     tag-branch:
+#       permissions:
+#         contents: write
+#       uses: BHS-BS/shared-workflow/.github/workflows/tag.yml@develop
+#       with:
+#         TAG: ${{ inputs.TAG }}
+#         BODY: ${{ inputs.BODY }}
+#         PRE_RELEASE: ${{ inputs.PRE_RELEASE }}
+#         DRAFT: ${{ inputs.DRAFT }}
+#
+# - The run fails if the tag already exists; an existing tag is never moved.
+# - A draft release does not create the git tag until the release is published (GitHub behaviour).
+# - GA rule: a SNAPSHOT tag is refused. An alpha, beta or RC tag is accepted only as a pre-release.
+
+on:
+  workflow_call:
+    inputs:
+      TAG:
+        required: true
+        type: string
+      BODY:
+        required: false
+        type: string
+        default: 'Changes in this Release'
+      # Strings, not booleans, so callers can pass their workflow_dispatch "True/False" inputs as they are.
+      PRE_RELEASE:
+        required: false
+        type: string
+        default: 'false'
+      DRAFT:
+        required: false
+        type: string
+        default: 'false'
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.TAG }}
+          BODY: ${{ inputs.BODY }}
+          PRE_RELEASE: ${{ inputs.PRE_RELEASE }}
+          DRAFT: ${{ inputs.DRAFT }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "::error::Invalid tag '$TAG': use letters, digits, '.', '_' and '-' only (e.g. v1.3.0)."
+            exit 1
+          fi
+
+          pre=$(echo "$PRE_RELEASE" | tr '[:upper:]' '[:lower:]')
+          draft=$(echo "$DRAFT" | tr '[:upper:]' '[:lower:]')
+          tag_lc=$(echo "$TAG" | tr '[:upper:]' '[:lower:]')
+
+          if [[ "$tag_lc" == *snapshot* ]]; then
+            echo "::error::'$TAG' is a SNAPSHOT tag. BHS releases are GA only."
+            exit 1
+          fi
+          if [[ "$tag_lc" =~ (^|[-._])(alpha|beta|rc)([-._0-9]|$) && "$pre" != "true" ]]; then
+            echo "::error::'$TAG' looks like an alpha, beta or RC build. Set PRE_RELEASE to True, or use a GA version."
+            exit 1
+          fi
+
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists in $GITHUB_REPOSITORY. Existing tags are never moved."
+            exit 1
+          fi
+
+          args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --notes "$BODY")
+          [[ "$pre" == "true" ]] && args+=(--prerelease)
+          [[ "$draft" == "true" ]] && args+=(--draft)
+
+          echo "Creating release $TAG on $GITHUB_SHA (${GITHUB_REF_NAME}) in $GITHUB_REPOSITORY (pre-release: $pre, draft: $draft)"
+          gh release create "$TAG" "${args[@]}"
+
+          {
+            echo "### Release $TAG"
+            echo
+            echo "- Commit: \`$GITHUB_SHA\` on \`$GITHUB_REF_NAME\`"
+            echo "- Pre-release: $pre"
+            echo "- Draft: $draft"
+          } >> "$GITHUB_STEP_SUMMARY"
